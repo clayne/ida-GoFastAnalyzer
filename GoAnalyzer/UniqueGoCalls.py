@@ -1,20 +1,30 @@
 import re
 
+import idc
 import ida_ua
 import ida_idp
-import ida_enum
+import ida_pro
 import ida_name
 import ida_bytes
 import ida_funcs
 import ida_allins
-import ida_struct
+if ida_pro.IDA_SDK_VERSION < 850:
+    import ida_enum
+    import ida_struct
+    get_enum_member_value = ida_enum.get_enum_member_value
+    get_enum_member_by_name = ida_enum.get_enum_member_by_name
+    get_enum_member_bmask = ida_enum.get_enum_member_bmask
+else:
+    get_enum_member_value = idc.get_enum_member_value
+    get_enum_member_by_name = idc.get_enum_member_by_name
+    get_enum_member_bmask = idc.get_enum_member_bmask
 import ida_hexrays
 import ida_typeinf
 from idc import BADADDR
 
 
 from GoAnalyzer.GoCallinfo import GoCall
-from GoAnalyzer.utils import BYTE_SIZE
+from GoAnalyzer.utils import BYTE_SIZE, create_type
 
 
 def translate(string: str, translation_dict: dict) -> str:
@@ -85,17 +95,20 @@ class RtypeCall:
                 is None
             ):
                 if typedef.group(2) == "_slice_":
-                    my_slice = ida_struct.get_struc(
-                        ida_struct.add_struc(BADADDR, translated_definition)
-                    )
-                    ida_struct.add_struc_member(
-                        my_slice,
-                        "ptr",
-                        BADADDR,
-                        ida_bytes.qword_flag(),
-                        None,
-                        8,
-                    )
+                    sid_or_tif = create_type(translated_definition)
+                    if ida_pro.IDA_SDK_VERSION < 850:
+                        my_slice = ida_struct.get_struc(sid_or_tif)
+                        ida_struct.add_struc_member(
+                            my_slice,
+                            "ptr",
+                            BADADDR,
+                            ida_bytes.qword_flag(),
+                            None,
+                            8,
+                        )
+                    else:
+                        my_slice = sid_or_tif
+                        my_slice.add_udm("ptr", ida_typeinf.BT_UNK_QWORD, my_slice.get_size() * 8)
 
                     tinfo = ida_typeinf.tinfo_t()
                     ida_typeinf.parse_decl(
@@ -105,25 +118,30 @@ class RtypeCall:
                     # set the ptr member type to be a pointer to our RTYPE
                     ptr_tinfo = ida_typeinf.tinfo_t()
                     ptr_tinfo.create_ptr(tinfo)
-                    mem = ida_struct.get_member(my_slice, 0)
-                    ida_struct.set_member_tinfo(my_slice, mem, 0, ptr_tinfo, 0)
+                    if ida_pro.IDA_SDK_VERSION < 850:
+                        mem = ida_struct.get_member(my_slice, 0)
+                        ida_struct.set_member_tinfo(my_slice, mem, 0, ptr_tinfo, 0)
 
-                    ida_struct.add_struc_member(
-                        my_slice,
-                        "len",
-                        BADADDR,
-                        ida_bytes.qword_flag(),
-                        None,
-                        8,
-                    )
-                    ida_struct.add_struc_member(
-                        my_slice,
-                        "cap",
-                        BADADDR,
-                        ida_bytes.qword_flag(),
-                        None,
-                        8,
-                    )
+                        ida_struct.add_struc_member(
+                            my_slice,
+                            "len",
+                            BADADDR,
+                            ida_bytes.qword_flag(),
+                            None,
+                            8,
+                        )
+                        ida_struct.add_struc_member(
+                            my_slice,
+                            "cap",
+                            BADADDR,
+                            ida_bytes.qword_flag(),
+                            None,
+                            8,
+                        )
+                    else:
+                        my_slice.set_udm_type(0, ptr_tinfo)
+                        my_slice.add_udm("len", ida_typeinf.BT_UNK_QWORD, my_slice.get_size() * 8)
+                        my_slice.add_udm("cap", ida_typeinf.BT_UNK_QWORD, my_slice.get_size() * 8)
 
         return starting_dict
 
@@ -157,7 +175,7 @@ class MapCall(RtypeCall):
 
     def __init__(self, *args) -> None:
         super().__init__(*args)
-        self.search_pattern = re.compile("\[(.*?)\](.*)$")
+        self.search_pattern = re.compile(r"\[(.*?)\](.*)$")
 
     def init(self) -> None:
         super().init()
@@ -199,11 +217,11 @@ class MapCall(RtypeCall):
         self.kind_offset = kind.offset // BYTE_SIZE
         self.kind_size = kind.size // BYTE_SIZE
 
-        self.kind_func = ida_enum.get_enum_member_value(
-            ida_enum.get_enum_member_by_name("KIND_FUNC")
+        self.kind_func = get_enum_member_value(
+            get_enum_member_by_name("KIND_FUNC")
         )
-        self.kind_mask = ida_enum.get_enum_member_bmask(
-            ida_enum.get_enum_member_by_name("KIND_FUNC")
+        self.kind_mask = get_enum_member_bmask(
+            get_enum_member_by_name("KIND_FUNC")
         )
 
     def fill_vars(self, ea: int) -> dict[str, str] | None:

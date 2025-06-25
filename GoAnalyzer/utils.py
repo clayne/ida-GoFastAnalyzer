@@ -1,5 +1,7 @@
+import ida_pro
 import ida_name
-import ida_struct
+if ida_pro.IDA_SDK_VERSION < 850:
+    import ida_struct
 import ida_typeinf
 from idc import BADADDR
 
@@ -36,8 +38,12 @@ def remove_tinfo_zeroes(tinfo: ida_typeinf.tinfo_t) -> bool:
     Create a new structure without zero size members in it from the type info we receive
     """
 
-    sid = ida_struct.add_struc(BADADDR, f"{tinfo.dstr()}_nozeroes")
-    struc = ida_struct.get_struc(sid)
+    name = f"{tinfo.dstr()}_nozeroes"
+    sid_or_tif = create_type(name)
+    if ida_pro.IDA_SDK_VERSION < 850:
+        struc = ida_struct.get_struc(sid_or_tif)
+    else:
+        struc_tif = sid_or_tif
 
     for i in range(tinfo.get_udt_nmembers()):
         # find member
@@ -61,9 +67,32 @@ def remove_tinfo_zeroes(tinfo: ida_typeinf.tinfo_t) -> bool:
 
         # convert tinfo information to struct information
         name = ida_name.validate_name(member.name, ida_name.SN_NOCHECK)
-        member_size = member.size // BYTE_SIZE
-        member_offset = member.offset // BYTE_SIZE
+        if ida_pro.IDA_SDK_VERSION < 850:
+            member_size = member.size // BYTE_SIZE
+            member_offset = member.offset // BYTE_SIZE
 
-        ida_struct.add_struc_member(struc, name, member_offset, 0, None, member_size)
-        mem = ida_struct.get_member(struc, member_offset)
-        ida_struct.set_member_tinfo(struc, mem, member_offset, member_type, 0)
+            ida_struct.add_struc_member(struc, name, member_offset, 0, None, member_size)
+            mem = ida_struct.get_member(struc, member_offset)
+            ida_struct.set_member_tinfo(struc, mem, member_offset, member_type, 0)
+        else:
+            member.name = name
+            struc_tif.add_udm(member)
+
+def tid_from_name(name: str) -> int:
+    if ida_pro.IDA_SDK_VERSION < 850:
+        return ida_struct.get_struc_id(name)
+    else:
+        return ida_typeinf.get_named_type_tid(name)
+
+def create_type(name: str) -> int | ida_typeinf.tinfo_t:
+    if ida_pro.IDA_SDK_VERSION < 850:
+        sid = ida_struct.add_struc(BADADDR, struc_name)
+        return sid
+    else:
+        udt = ida_typeinf.udt_type_data_t()
+        udt.is_union = False
+        tif = ida_typeinf.tinfo_t()
+        tif.create_udt(udt)
+        tif.set_named_type(None, name)
+        return tif
+

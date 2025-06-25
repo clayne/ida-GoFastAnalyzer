@@ -8,6 +8,7 @@ import ida_ua
 import ida_ida
 import ida_idp
 import ida_gdl
+import ida_pro
 import ida_nalt
 import ida_name
 import ida_xref
@@ -15,7 +16,8 @@ import ida_bytes
 import ida_funcs
 import ida_allins
 import ida_idaapi
-import ida_struct
+if ida_pro.IDA_SDK_VERSION < 850:
+    import ida_struct
 import ida_hexrays
 import ida_netnode
 import ida_segment
@@ -32,6 +34,8 @@ from GoAnalyzer.utils import (
     runtime_morestack_functions,
     remove_tinfo_zeroes,
     go_calling_convention,
+    tid_from_name,
+    create_type,
 )
 
 go_version_regex = re.compile("go\\d\\.(\\d{1,2})(\\.\\d{1,2})?$")
@@ -58,10 +62,14 @@ class Xmm15Optimizer(ida_hexrays.microcode_filter_t):
         as specified in the go abi
         """
         l_reg = cdg.load_effective_address(0)
+        if l_reg == ida_hexrays.mr_none:
+            return ida_hexrays.MERR_INSN
 
         # initialize micro operands
         off = ida_hexrays.mop_t(l_reg, 8)
         sel_reg = ida_hexrays.reg2mreg(ida_segregs.R_ss)
+        if sel_reg == ida_hexrays.mr_none:
+            return ida_hexrays.MERR_INSN
         sel = ida_hexrays.mop_t(sel_reg, 2)
         zero = ida_hexrays.mop_t()
         zero.make_number(0, 8)
@@ -502,18 +510,28 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
         else:
             # sometimes functions' parents create their return type for them
             struc_name = f"retval_{func.start_ea:X}"
-            if ida_struct.get_struc_id(struc_name) == BADADDR:
+            if tid_from_name(struc_name) == BADADDR:
                 # create the result struct if it doesn't exist
-                retval_struc = ida_struct.add_struc(BADADDR, struc_name)
+
+                retval_struc_sid_or_tif = create_type(struc_name)
+                if ida_pro.IDA_SDK_VERSION < 850:
+                    retval_struc = ida_struct.get_struc(retval_struc_sid_or_tif)
+                else:
+                    retval_struc_tif = retval_struc_sid_or_tif
                 for i in range(used_reg + 1):
-                    ida_struct.add_struc_member(
-                        ida_struct.get_struc(retval_struc),
-                        f"part_{i}",
-                        BADADDR,
-                        ida_bytes.qword_flag(),
-                        None,
-                        8,
-                    )
+                    name = f"part_{i}"
+                    if ida_pro.IDA_SDK_VERSION < 850:
+                        ida_struct.add_struc_member(
+                            retval_struc,
+                            name,
+                            BADADDR,
+                            ida_bytes.qword_flag(),
+                            None,
+                            8,
+                        )
+                    else:
+                        retval_struc_tif.add_udm(name, ida_typeinf.BT_UNK_QWORD, retval_struc_tif.get_size() * 8)
+
             return struc_name
 
     def fix_call_by_ea(self, mba: ida_hexrays.mba_t, callee_ea: int) -> None:
@@ -780,9 +798,15 @@ class GoAnalyzer(ida_idaapi.plugin_t):
         go_buildinf_pattern = " ".join(hex(char)[2:] for char in b"\xff Go buildinf:")
 
         ida_bytes.parse_binpat_str(binpat_vec, seg_start, go_buildinf_pattern, 0x10)
-        version_string_start = ida_bytes.bin_search(
-            seg_start, seg_start + 0x1000, binpat_vec, ida_bytes.BIN_SEARCH_FORWARD
-        )
+        if ida_pro.IDA_SDK_VERSION < 850:
+            version_string_start = ida_bytes.bin_search(
+                seg_start, seg_start + 0x1000, binpat_vec, ida_bytes.BIN_SEARCH_FORWARD
+            )
+        else:
+            version_string_start, _ = ida_bytes.bin_search(
+                seg_start, seg_start + 0x1000, binpat_vec, ida_bytes.BIN_SEARCH_FORWARD
+            )
+
 
         if version_string_start == BADADDR:
             return ida_idaapi.PLUGIN_SKIP
@@ -822,9 +846,13 @@ class GoAnalyzer(ida_idaapi.plugin_t):
         """Install all the hooks we need and do our initialization"""
         if not self.initialized:
             self.detected_go = False
+            if ida_pro.IDA_SDK_VERSION < 850:
+                cm = ida_idaapi.get_inf_structure().cc.cm
+            else:
+                cm = ida_ida.inf_get_cc_cm()
             if (
                 GO_SUPPORTED
-                and ida_idaapi.get_inf_structure().cc.cm & ida_typeinf.CM_CC_MASK
+                and cm & ida_typeinf.CM_CC_MASK
                 == ida_typeinf.CM_CC_GOLANG
             ):
                 self.detected_go = True
@@ -841,16 +869,19 @@ class GoAnalyzer(ida_idaapi.plugin_t):
                 ida_typeinf.get_named_type(None, "runtime_g", ida_typeinf.NTF_TYPE)
                 is None
             ):
-                runtime_g_struct = ida_struct.add_struc(BADADDR, "runtime_g")
-                # newer versions of ida seem to need the structure to have members in order to parse it correctly
-                ida_struct.add_struc_member(
-                    ida_struct.get_struc(runtime_g_struct),
-                    "data",
-                    BADADDR,
-                    0,
-                    None,
-                    8,
-                )
+                runtime_g_struct = create_type("runtime_g")
+                if ida_pro.IDA_SDK_VERSION < 850:
+                    # newer versions of ida seem to need the structure to have members in order to parse it correctly
+                    ida_struct.add_struc_member(
+                        ida_struct.get_struc(runtime_g_struct),
+                        "data",
+                        BADADDR,
+                        0,
+                        None,
+                        8,
+                    )
+                else:
+                    runtime_g_struct.add_udm("data", ida_typeinf.BT_UNK_QWORD, 0)
                 ida_typeinf.parse_decl(
                     self.runtime_g, None, "runtime_g;", ida_typeinf.PT_SIL
                 )
@@ -864,23 +895,27 @@ class GoAnalyzer(ida_idaapi.plugin_t):
 
             # create the string struct if it doesn't already exist
             if ida_typeinf.get_named_type(None, "string", ida_typeinf.NTF_TYPE) is None:
-                string_struc = ida_struct.add_struc(BADADDR, "string")
-                ida_struct.add_struc_member(
-                    ida_struct.get_struc(string_struc),
-                    "ptr",
-                    BADADDR,
-                    ida_bytes.qword_flag(),
-                    None,
-                    8,
-                )
-                ida_struct.add_struc_member(
-                    ida_struct.get_struc(string_struc),
-                    "len",
-                    BADADDR,
-                    ida_bytes.qword_flag(),
-                    None,
-                    8,
-                )
+                string_struc = create_type("string")
+                if ida_pro.IDA_SDK_VERSION < 850:
+                    ida_struct.add_struc_member(
+                        ida_struct.get_struc(string_struc),
+                        "ptr",
+                        BADADDR,
+                        ida_bytes.qword_flag(),
+                        None,
+                        8,
+                    )
+                    ida_struct.add_struc_member(
+                        ida_struct.get_struc(string_struc),
+                        "len",
+                        BADADDR,
+                        ida_bytes.qword_flag(),
+                        None,
+                        8,
+                    )
+                else:
+                    string_struc.add_udm("ptr", ida_typeinf.BT_UNK_QWORD, 0)
+                    string_struc.add_udm("len", ida_typeinf.BT_UNK_QWORD, string_struc.get_size() * 8)
 
             self.optimizer = R14Optimizer(self.runtime_g)
             self.initialized = True

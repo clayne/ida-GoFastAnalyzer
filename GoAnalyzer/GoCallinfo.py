@@ -1,13 +1,15 @@
+import ida_pro
 import ida_idp
 import ida_name
 import ida_range
-import ida_struct
+if ida_pro.IDA_SDK_VERSION < 850:
+    import ida_struct
 import ida_hexrays
 import ida_typeinf
 
 from idc import BADADDR
 
-from GoAnalyzer.utils import BYTE_SIZE, go_fast_convention, go_calling_convention
+from GoAnalyzer.utils import BYTE_SIZE, go_fast_convention, go_calling_convention, create_type
 
 
 def get_sized_register_by_name(reg_name: str, reg_size: int) -> str:
@@ -19,8 +21,9 @@ def fill_tinfo(tinfo: ida_typeinf.tinfo_t) -> None:
     """
     Create a new structure without gaps in it from the type info we receive
     """
-    sid = ida_struct.add_struc(BADADDR, f"{tinfo.dstr()}_nogaps")
-    struc = ida_struct.get_struc(sid)
+    sid_or_tif = create_type(f"{tinfo.dstr()}_nogaps")
+    if ida_pro.IDA_SDK_VERSION < 850:
+        struc = ida_struct.get_struc(sid_or_tif)
 
     gap_range = ida_range.rangeset_t()
 
@@ -44,24 +47,45 @@ def fill_tinfo(tinfo: ida_typeinf.tinfo_t) -> None:
 
         # convert tinfo information to struct information
         name = ida_name.validate_name(member.name, ida_name.SN_NOCHECK)
-        member_size = member.size // BYTE_SIZE
-        member_offset = member.offset // BYTE_SIZE
+        if ida_pro.IDA_SDK_VERSION < 850:
+            member_size = member.size // BYTE_SIZE
+            member_offset = member.offset // BYTE_SIZE
 
-        ida_struct.add_struc_member(struc, name, member_offset, 0, None, member_size)
-        mem = ida_struct.get_member(struc, member_offset)
-        ida_struct.set_member_tinfo(struc, mem, member_offset, member_type, 0)
+            ida_struct.add_struc_member(struc, name, member_offset, 0, None, member_size)
+            mem = ida_struct.get_member(struc, member_offset)
+            ida_struct.set_member_tinfo(struc, mem, member_offset, member_type, 0)
+        else:
+            member.name = name
+            sid_or_tif.add_udm(member)
+
 
     # fill gaps in our current struct
     tinfo.calc_gaps(gap_range)
+
     for range_item in gap_range:
-        ida_struct.add_struc_member(
-            struc,
-            f"aligning_gap_{hex(range_item.start_ea)}",
-            range_item.start_ea,
-            0,
-            None,
-            range_item.end_ea - range_item.start_ea,
-        )
+        name = f"aligning_gap_{hex(range_item.start_ea)}"
+        if ida_pro.IDA_SDK_VERSION < 850:
+            ida_struct.add_struc_member(
+                struc,
+                name,
+                range_item.start_ea,
+                0,
+                None,
+                range_item.end_ea - range_item.start_ea,
+            )
+        else:
+            udm = ida_typeinf.udm_t()
+            udm.offset = range_item.start_ea * 8
+            udm.size = (range_item.end_ea - range_item.start_ea) * 8
+            char_tif = ida_typeinf.tinfo_t()
+
+            char_tif.create_simple_type(ida_typeinf.BTF_CHAR)
+            tif = ida_typeinf.tinfo_t()
+            tif.create_array(char_tif, range_item.end_ea - range_item.start_ea)
+            udm.type = tif
+            udm.name = name
+            sid_or_tif.add_udm(udm)
+
 
 
 class GoTypeAssigner:
@@ -258,7 +282,7 @@ class GoCall:
                 current_mcall.argloc = loc
 
         if len(scattered) > 1:
-            scif = ida_hexrays.scif_t(self.mba, tinfo_copy.copy())
+            scif = ida_hexrays.scif_t(self.mba, tinfo_copy.copy(), "")
             scif.consume_scattered(scattered)
             current_mcall.argloc = scif
             current_mcall.create_from_scattered_vdloc(
